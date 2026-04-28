@@ -13,17 +13,81 @@ import (
 	"github.com/pkg/errors"
 )
 
+// FilterTablesForIncremental filters tables based on change detection.
+//
+// --ao-file-hash and --heap-file-hash are independent:
+//   - AO tables:  default=modcount+DDL; with --ao-file-hash=aoseg content hash
+//   - Heap tables: default=always backup (original gpbackup behavior);
+//                   with --heap-file-hash=file hash (skip unchanged)
 func FilterTablesForIncremental(lastBackupTOC, currentTOC *toc.TOC, tables []Table) []Table {
+	useAOHash := MustGetFlagBool(options.AO_FILE_HASH)
+	useHeapHash := MustGetFlagBool(options.HEAP_FILE_HASH)
+
 	var filteredTables []Table
 	for _, table := range tables {
-		currentAOEntry, isAOTable := currentTOC.IncrementalMetadata.AO[table.FQN()]
-		if !isAOTable {
-			filteredTables = append(filteredTables, table)
+		fqn := table.FQN()
+
+		// --- AO table ---
+		if currentAO, isAO := currentTOC.IncrementalMetadata.AO[fqn]; isAO {
+			if useAOHash && currentAO.FileHashMD5 != "" {
+				// --ao-file-hash: per-table aoseg content hash
+				prevAO, hasPrev := lastBackupTOC.IncrementalMetadata.AO[fqn]
+				if !hasPrev || prevAO.FileHashMD5 == "" {
+					gplog.Debug("Filter: %s (AO/content) prev hash missing, including", fqn)
+					filteredTables = append(filteredTables, table)
+					continue
+				}
+				changed := prevAO.FileHashMD5 != currentAO.FileHashMD5
+				gplog.Debug("Filter: %s (AO/content) prev=%s curr=%s changed=%v",
+					fqn, prevAO.FileHashMD5, currentAO.FileHashMD5, changed)
+				if changed {
+					filteredTables = append(filteredTables, table)
+				}
+			} else {
+				// Default: modcount + DDL timestamp
+				prevAO := lastBackupTOC.IncrementalMetadata.AO[fqn]
+				changed := prevAO.Modcount != currentAO.Modcount ||
+					prevAO.LastDDLTimestamp != currentAO.LastDDLTimestamp
+				gplog.Debug("Filter: %s (AO/modcount) prev=%d curr=%d changed=%v",
+					fqn, prevAO.Modcount, currentAO.Modcount, changed)
+				if changed {
+					filteredTables = append(filteredTables, table)
+				}
+			}
 			continue
 		}
-		previousAOEntry := lastBackupTOC.IncrementalMetadata.AO[table.FQN()]
 
-		if previousAOEntry.Modcount != currentAOEntry.Modcount || previousAOEntry.LastDDLTimestamp != currentAOEntry.LastDDLTimestamp {
+		// --- Heap table ---
+		if useHeapHash {
+			// --heap-file-hash: use file hash to detect changes
+			if currentTOC.IncrementalMetadata.Heap == nil {
+				filteredTables = append(filteredTables, table)
+				continue
+			}
+			currentHeap, isHeap := currentTOC.IncrementalMetadata.Heap[fqn]
+			if !isHeap || currentHeap.FileHashMD5 == "" {
+				gplog.Debug("Filter: %s (Heap) no current hash, including", fqn)
+				filteredTables = append(filteredTables, table)
+				continue
+			}
+			if lastBackupTOC.IncrementalMetadata.Heap == nil {
+				filteredTables = append(filteredTables, table)
+				continue
+			}
+			prevHeap, hasPrev := lastBackupTOC.IncrementalMetadata.Heap[fqn]
+			if !hasPrev || prevHeap.FileHashMD5 == "" {
+				gplog.Debug("Filter: %s (Heap) prev hash missing, including", fqn)
+				filteredTables = append(filteredTables, table)
+				continue
+			}
+			changed := prevHeap.FileHashMD5 != currentHeap.FileHashMD5
+			gplog.Debug("Filter: %s (Heap) prev=%s curr=%s changed=%v",
+				fqn, prevHeap.FileHashMD5, currentHeap.FileHashMD5, changed)
+			if changed {
+				filteredTables = append(filteredTables, table)
+			}
+		} else {
+			// Default (original gpbackup behavior): Heap tables always included
 			filteredTables = append(filteredTables, table)
 		}
 	}

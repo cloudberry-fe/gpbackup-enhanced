@@ -434,3 +434,121 @@ func GetBackupConfig(timestamp string, historyDB *sql.DB) (*BackupConfig, error)
 
 	return &backupConfig, err
 }
+
+// ListBackups returns backup configs from the history database, filtered by backupDir.
+// If backupDir is empty, all backups are returned.
+func ListBackups(historyDB *sql.DB, backupDir string) ([]BackupConfig, error) {
+	query := `SELECT timestamp FROM backups`
+	if backupDir != "" {
+		query += fmt.Sprintf(` WHERE backup_dir = '%s'`, backupDir)
+	}
+	query += ` ORDER BY timestamp DESC`
+	rows, err := historyDB.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var backups []BackupConfig
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err != nil {
+			return nil, err
+		}
+		cfg, err := GetMainBackupInfo(ts, historyDB)
+		if err != nil {
+			continue
+		}
+		// Also get restore plan to determine incremental dependencies
+		fullCfg, err := GetBackupConfig(ts, historyDB)
+		if err == nil {
+			cfg.RestorePlan = fullCfg.RestorePlan
+		}
+		backups = append(backups, cfg)
+	}
+	return backups, nil
+}
+
+// FindDependentBackups returns timestamps of all incremental backups that depend
+// on the given base timestamp (i.e., their restore plan references it).
+func FindDependentBackups(historyDB *sql.DB, baseTimestamp string) ([]string, error) {
+	// An incremental backup depends on baseTimestamp if its restore_plans table
+	// contains baseTimestamp as a restore_plan_timestamp.
+	query := fmt.Sprintf(`
+		SELECT DISTINCT rp.timestamp FROM restore_plans rp
+		WHERE rp.restore_plan_timestamp = '%s'
+		AND rp.timestamp != '%s'
+		ORDER BY rp.timestamp`, baseTimestamp, baseTimestamp)
+
+	rows, err := historyDB.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var deps []string
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err != nil {
+			return nil, err
+		}
+		deps = append(deps, ts)
+	}
+	return deps, nil
+}
+
+// DeleteBackup removes a backup record and all associated data from the history database.
+// If the backup is a full backup, all dependent incremental backups are also deleted.
+// Returns the list of timestamps that were deleted.
+func DeleteBackup(historyDB *sql.DB, timestamp string) ([]string, error) {
+	cfg, err := GetMainBackupInfo(timestamp, historyDB)
+	if err != nil {
+		return nil, fmt.Errorf("backup %s not found: %w", timestamp, err)
+	}
+	_ = cfg // used to check Incremental below
+
+	// Collect all timestamps to delete
+	toDelete := []string{timestamp}
+
+	// If it's a full backup, find and collect all dependent incrementals
+	if !cfg.Incremental {
+		deps, err := FindDependentBackups(historyDB, timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("error finding dependent backups: %w", err)
+		}
+		allDeps := make(map[string]bool)
+		for _, d := range deps {
+			allDeps[d] = true
+		}
+		for _, d := range deps {
+			transitive, _ := FindDependentBackups(historyDB, d)
+			for _, t := range transitive {
+				allDeps[t] = true
+			}
+		}
+		for dep := range allDeps {
+			toDelete = append(toDelete, dep)
+		}
+	}
+
+	// Hard delete all collected timestamps from all tables
+	for _, ts := range toDelete {
+		hardDeleteTimestamp(historyDB, ts)
+	}
+
+	return toDelete, nil
+}
+
+// hardDeleteTimestamp removes all records for a given timestamp from the history database.
+func hardDeleteTimestamp(historyDB *sql.DB, timestamp string) {
+	// Delete from auxiliary tables first (foreign key constraints)
+	for _, table := range []string{
+		"restore_plan_tables", "restore_plans",
+		"exclude_relations", "exclude_schemas",
+		"include_relations", "include_schemas",
+	} {
+		historyDB.Exec(fmt.Sprintf("DELETE FROM %s WHERE timestamp = '%s'", table, timestamp))
+	}
+	// Delete from main backups table
+	historyDB.Exec(fmt.Sprintf("DELETE FROM backups WHERE timestamp = '%s'", timestamp))
+}

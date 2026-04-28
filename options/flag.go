@@ -54,6 +54,11 @@ const (
 	RESIZE_CLUSTER        = "resize-cluster"
 	NO_INHERITS           = "no-inherits"
 	REPORT_DIR            = "report-dir"
+	HEAP_FILE_HASH        = "heap-file-hash"
+	AO_FILE_HASH          = "ao-file-hash"
+	GEN_EXT_METADATA      = "gen-ext-metadata"
+	LIST_BACKUPS          = "list-backups"
+	DELETE_BACKUP         = "delete-backup"
 )
 
 func SetBackupFlagDefaults(flagSet *pflag.FlagSet) {
@@ -89,6 +94,11 @@ func SetBackupFlagDefaults(flagSet *pflag.FlagSet) {
 	flagSet.Bool(WITH_STATS, false, "Back up query plan statistics")
 	flagSet.Bool(WITHOUT_GLOBALS, false, "Skip backup of global metadata")
 	flagSet.Bool(NO_INHERITS, false, "For a filtered backup, don't back up all tables that inherit included tables")
+	flagSet.Bool(HEAP_FILE_HASH, false, "Use file timestamp hash to detect heap table changes during incremental backup. Requires --leaf-partition-data for full backups to build baseline")
+	flagSet.Bool(AO_FILE_HASH, false, "Use per-table aoseg content hash for AO table change detection. Avoids backing up all partitions when only one child partition changed (GP5 modcount propagation issue)")
+	flagSet.Bool(GEN_EXT_METADATA, false, "Generate external table metadata files after backup, enabling cross-cluster backup querying via gpbackup_ext_query.sh --use-metadata")
+	flagSet.Bool(LIST_BACKUPS, false, "List all backups in the history database and exit")
+	flagSet.String(DELETE_BACKUP, "", "Delete the backup with the specified timestamp and all its dependent incremental backups")
 }
 
 func SetRestoreFlagDefaults(flagSet *pflag.FlagSet) {
@@ -125,6 +135,8 @@ func SetRestoreFlagDefaults(flagSet *pflag.FlagSet) {
 	flagSet.Bool(RESIZE_CLUSTER, false, "Restore a backup taken on a cluster with more or fewer segments than the cluster to which it will be restored")
 	flagSet.String(REPORT_DIR, "", "The absolute path of the directory to which restore report and error tables will be written")
 	_ = flagSet.MarkHidden(LEAF_PARTITION_DATA)
+	flagSet.Bool(LIST_BACKUPS, false, "List all backups in the history database and exit")
+	flagSet.String(DELETE_BACKUP, "", "Delete the backup with the specified timestamp and all its dependent incremental backups")
 }
 
 /*

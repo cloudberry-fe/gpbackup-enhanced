@@ -17,6 +17,10 @@ func main() {
 		Args:    cobra.NoArgs,
 		Version: GetVersion(),
 		Run: func(cmd *cobra.Command, args []string) {
+			// Handle management commands (--list-backups, --delete-backup)
+			if HandleManageCommands() {
+				return
+			}
 			defer DoTeardown()
 			DoValidation(cmd)
 			DoSetup()

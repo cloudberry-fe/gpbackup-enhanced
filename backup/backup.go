@@ -199,6 +199,10 @@ func DoBackup() {
 	}
 
 	globalTOC.WriteToFileAndMakeReadOnly(globalFPInfo.GetTOCFilePath())
+
+	// Generate external table metadata files if requested
+	GenerateExtMetadata()
+
 	for connNum := 0; connNum < connectionPool.NumConns; connNum++ {
 		// COMMIT TRANSACTION
 		// The transaction could have been rollbacked already

@@ -1,164 +1,180 @@
-# Greenplum Backup
+# Greenplum Backup (Enhanced Edition)
 
-`gpbackup` and `gprestore` are Go utilities for performing Greenplum Database backups.  They are still currently in active development.
+`gpbackup` and `gprestore` are Go utilities for performing Greenplum Database backups. This enhanced edition adds **heap table incremental backup**, **AO partition-level change detection**, **backup set management**, and **external table backup querying**.
 
-## Pre-Requisites
+## Key Enhancements
 
-The project requires the Go Programming language version 1.11 or higher. Follow the directions [here](https://golang.org/doc/) for installation, usage and configuration instructions.
-The project also has a dependency on `sqlite3`. This is installed by default on many platforms, but you must install it on your system if it is not present.
+| Feature | Description |
+|---------|-------------|
+| **Heap table incremental** | Detects heap table changes via `pg_stat_file` after CHECKPOINT |
+| **AO partition-level detection** | Uses `pg_aoseg` content hash (`eof` + `tupcount`) to solve GP5 modcount propagation |
+| **Backup management** | `--list-backups` / `--delete-backup` with cascade delete and physical file cleanup |
+| **External table query** | `gpbackup_ext_query.sh` — query backup data via gpfdist + external tables without restore |
+| **GP5/6/7 compatible** | Auto-adapts plpythonu/plpython3u, gp_session_role/gp_role, pg_filespace_entry/datadir |
 
-## Downloading
+## Documentation
 
-```bash
-go get github.com/greenplum-db/gpbackup/...
-```
+- **[User Guide (English)](docs/USER_GUIDE_EN.md)** — full usage manual with examples and best practices
+- **[User Guide (中文)](docs/USER_GUIDE_CN.md)** — 完整中文使用手册
 
-This will place the code in `$GOPATH/github.com/greenplum-db/gpbackup`.
+## Quick Start
 
-## Building and installing binaries
+### Prerequisites
 
-Make the `gpbackup` directory your current working directory and run:
+- Go 1.19+ (build only)
+- Greenplum Database 5.x / 6.x / 7.x, Apache Cloudberry, or Euler Database
+- Passwordless SSH between coordinator and segment hosts (for `--delete-backup` and `gpbackup_ext_query.sh`)
 
-```bash
-make depend
-make build
-```
-
-The `build` target will put the `gpbackup` and `gprestore` binaries in `$HOME/go/bin`.
-
-This will also attempt to copy `gpbackup_helper` to the greenplum segments (retrieving hostnames from `gp_segment_configuration`). Pay attention to the output as it will indicate whether this operation was successful.
-
-`make build_linux` is for cross compiling on macOS, and the target is Linux.
-
-`make install` will scp the `gpbackup_helper` binary (used with -single-data-file flag) to all hosts
-
-## Validation and code quality
-
-### Test setup
-
-Required for Greenplum Database 6 or higher, several tests require the `dummy_seclabel` Greenplum contrib module. This module exists only to support regression testing of the SECURITY LABEL statement. It is not intended to be used in production. Use the following commands to install the module.
+### Build
 
 ```bash
-pushd $(find ~/workspace/gpdb -name dummy_seclabel)
-    make install
-    gpconfig -c shared_preload_libraries -v dummy_seclabel
-    gpstop -ra
-    gpconfig -s shared_preload_libraries | grep dummy_seclabel
-popd
+GIT_VERSION="1.30.5-custom"
 
+go build -tags gpbackup -o gpbackup \
+    -ldflags "-X github.com/greenplum-db/gpbackup/backup.version=${GIT_VERSION}" \
+    ./gpbackup.go
+
+go build -tags gprestore -o gprestore \
+    -ldflags "-X github.com/greenplum-db/gpbackup/restore.version=${GIT_VERSION}" \
+    ./gprestore.go
+
+go build -tags gpbackup_helper -o gpbackup_helper \
+    -ldflags "-X github.com/greenplum-db/gpbackup/helper.version=${GIT_VERSION}" \
+    ./gpbackup_helper.go
 ```
 
-### Test execution
+### Install
 
-**NOTE**: The integration and end_to_end tests require a running Greenplum Database instance.
-
-To run all tests except end-to-end (linters, unit, and integration), use
 ```bash
-make test
+cp gpbackup gprestore gpbackup_helper $GPHOME/bin/
+cp gpbackup_ext_query.sh $GPHOME/bin/
+chmod 755 $GPHOME/bin/gpbackup $GPHOME/bin/gprestore $GPHOME/bin/gpbackup_helper $GPHOME/bin/gpbackup_ext_query.sh
 ```
-To run only unit tests, use
+
+### Usage
+
 ```bash
-make unit
+# Full backup (with AO content hash baseline)
+gpbackup --dbname mydb --backup-dir /data/backup --leaf-partition-data --ao-file-hash
+
+# Incremental backup (partition-level precision)
+gpbackup --dbname mydb --backup-dir /data/backup --leaf-partition-data \
+    --incremental --heap-file-hash --ao-file-hash
+
+# Restore (automatically handles full + incremental)
+gprestore --timestamp 20260422120000 --backup-dir /data/backup \
+    --redirect-db restore_db --create-db
+
+# List all backups
+gpbackup --list-backups --backup-dir /data/backup
+
+# Delete backup (cascades to dependent incrementals + physical files)
+gpbackup --delete-backup 20260422120000 --backup-dir /data/backup
+
+# Query backup data via external tables (no restore needed)
+gpbackup_ext_query.sh --timestamp 20260422120000 \
+    --backup-dir /data/backup --dbname mydb --ext-schema ext_bak
+
+psql -d mydb -c "SELECT count(*) FROM ext_bak.orders;"
+
+# Cleanup external tables and gpfdist
+gpbackup_ext_query.sh --timestamp 20260422120000 \
+    --backup-dir /data/backup --dbname mydb --ext-schema ext_bak --stop
 ```
-To run only integration tests
+
+## New Parameters
+
+### gpbackup
+
+| Parameter | Description |
+|-----------|-------------|
+| `--heap-file-hash` | Use file hash to detect heap table changes. Independently usable with full backup (baseline) or incremental |
+| `--ao-file-hash` | Use aoseg content hash for AO tables. Independently usable with full backup (baseline) or incremental (partition-level detection) |
+| `--gen-ext-metadata` | Generate external table metadata files after backup for cross-cluster querying |
+| `--list-backups` | List all backups in `--backup-dir` and exit |
+| `--delete-backup <TS>` | Delete backup and dependent incrementals, including physical files on all hosts |
+
+### gprestore
+
+| Parameter | Description |
+|-----------|-------------|
+| `--list-backups` | List all backups in `--backup-dir` and exit |
+| `--delete-backup <TS>` | Delete backup and dependent incrementals |
+
+### gpbackup_ext_query.sh
+
+| Parameter | Description |
+|-----------|-------------|
+| `--timestamp <TS>` | Backup timestamp |
+| `--backup-dir <DIR>` | Backup directory |
+| `--dbname <DB>` | Target database for external tables |
+| `--ext-schema <NAME>` | External table schema. Default: `<source_schema>_<timestamp>` |
+| `--include-table <S.T>` | Filter to specific table(s) |
+| `--include-schema <S>` | Filter to specific schema(s) |
+| `--gpfdist-port <PORT>` | gpfdist port (default: random) |
+| `--gen-metadata` | Generate metadata files for cross-cluster querying |
+| `--use-metadata` | Read table structures from metadata file (no source DB needed) |
+| `--stop` | Stop gpfdist and drop external tables |
+
+## Incremental Detection Modes
+
+| Mode | Heap Tables | AO Tables | Best For |
+|------|-------------|-----------|----------|
+| `--incremental` | Always backup (original) | modcount + DDL timestamp | General use |
+| `+ --heap-file-hash` | File hash (mtime+size) | modcount + DDL timestamp | Skip unchanged heap tables |
+| `+ --ao-file-hash` | Always backup (original) | aoseg content hash (eof+tupcount) | GP5 partition tables |
+| `+ both` | File hash (mtime+size) | aoseg content hash (eof+tupcount) | Full precision |
+
+## Project Structure
+
+```
+gpbackup/
+├── gpbackup.go              # gpbackup entry point
+├── gprestore.go             # gprestore entry point
+├── gpbackup_helper.go       # segment helper entry point
+├── gpbackup_ext_query.sh    # external table query tool
+├── backup/
+│   ├── backup.go            # main backup logic
+│   ├── incremental.go       # incremental change detection (enhanced)
+│   ├── queries_incremental.go  # SQL queries for incremental metadata (enhanced)
+│   ├── manage.go            # --list-backups / --delete-backup implementation
+│   └── wrappers.go          # metadata collection orchestration (enhanced)
+├── restore/
+│   ├── restore.go           # main restore logic
+│   └── manage.go            # --list-backups / --delete-backup implementation
+├── history/
+│   └── history.go           # backup history DB operations (enhanced)
+├── toc/
+│   └── toc.go               # TOC types with HeapEntry + FileHashMD5 (enhanced)
+├── options/
+│   └── flag.go              # CLI flag definitions (enhanced)
+├── docs/
+│   ├── USER_GUIDE_EN.md     # English user guide
+│   └── USER_GUIDE_CN.md     # Chinese user guide
+└── ...
+```
+
+## Original Documentation
+
+The original gpbackup project documentation is available at the [gpbackup wiki](https://github.com/greenplum-db/gpbackup/wiki).
+
+## Development
+
+### Running Tests
+
 ```bash
-make integration
+make unit           # unit tests
+make integration    # integration tests (requires running GPDB)
+make end_to_end     # end-to-end tests (requires running GPDB)
 ```
-Integration test requirements
- - Running GPDB instance
- - GPDB's gpcloud extension
+
+### Code Formatting
+
 ```bash
-make -C gpcontrib/gpcloud/ install
-```
- - GPDB configured with `--with-perl`
-
-To run end to end tests (requires a running GPDB instance), use
-```bash
-make end_to_end
+make format         # auto-format with goimports + gofmt
+make lint           # run linter
 ```
 
-**We provide the following targets to help developers ensure their code fits Go standard formatting guidelines.**
+## License
 
-To run a linting tool that checks for basic coding errors, use
-```bash
-make lint
-```
-This target runs [gometalinter](https://github.com/alecthomas/gometalinter).
-
-Note: The lint target will fail if code is not formatted properly.
-
-
-To automatically format your code and add/remove imports, use
-```bash
-make format
-```
-This target runs [goimports](https://godoc.org/golang.org/x/tools/cmd/goimports) and [gofmt](https://golang.org/cmd/gofmt/).
-We will only accept code that has been formatted using this target or an equivalent `gofmt` call.
-
-## Running the utilities
-
-The basic command for gpbackup is
-```bash
-gpbackup --dbname <your_db_name>
-```
-
-The basic command for gprestore is
-```bash
-gprestore --timestamp <YYYYMMDDHHMMSS>
-```
-
-Run `--help` with either command for a complete list of options.
-
-## Cleaning up
-
-To remove the compiled binaries and other generated files, run
-```bash
-make clean
-```
-
-# More Information
-
-The Greenplum Backup [wiki](https://github.com/greenplum-db/gpbackup/wiki) for this project has several articles providing a more in-depth explanation of certain aspects of gpbackup and gprestore.
-
-# How to Contribute
-
-See [CONTRIBUTING.md file](https://github.com/greenplum-db/gpbackup/blob/master/CONTRIBUTING.md).
-
-# Code Formatting
-
-We use `goimports` to format go code. See https://godoc.org/golang.org/x/tools/cmd/goimports
-The following command formats the gpbackup codebase excluding the vendor directory and also lists the files updated.
-```bash
-goimports -w -l $(find . -type f -name '*.go' -not -path "./vendor/*")
-```
-
-# Troubleshooting
-
-## Dummy Security Label module is not installed or configured
-
-If you see errors in many integration tests (below), review the
-Validation and code quality [Test setup](#Test setup) section above:
-
-```
-SECURITY LABEL FOR dummy ON TYPE public.testtype IS 'unclassified';
-      Expected
-          <pgx.PgError>: {
-              Severity: "ERROR",
-              Code: "22023",
-              Message: "security label provider \"dummy\" is not loaded",
-```
-
-## Tablespace already exists
-
-If you see errors indicating the `test_tablespace` tablespace already
-exists (below), execute `psql postgres -c 'DROP TABLESPACE
-test_tablespace'` to cleanup the environment and rerun the tests.
-
-```
-    CREATE TABLESPACE test_tablespace LOCATION '/tmp/test_dir'
-    Expected
-        <pgx.PgError>: {
-            Severity: "ERROR",
-            Code: "42710",
-            Message: "tablespace \"test_tablespace\" already exists",
-```
+See [LICENSE](LICENSE) file.
