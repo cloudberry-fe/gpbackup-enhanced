@@ -126,7 +126,11 @@ $BODY$ LANGUAGE plpgsql;`
 	return true
 }
 
-// getHeapTableFQNs returns fully qualified names of all heap tables in the backup set
+// getHeapTableFQNs returns fully qualified names of all heap tables whose data
+// will actually be backed up — i.e. standalone heap tables plus the *leaf*
+// partitions of partitioned heap tables. Partition parents are excluded
+// because under --leaf-partition-data the data flows through leaves only,
+// and FilterTablesForIncremental looks up hashes by leaf FQN.
 func getHeapTableFQNs(connectionPool *dbconn.DBConn) []string {
 	var query string
 	if connectionPool.Version.Before("7") {
@@ -136,7 +140,7 @@ func getHeapTableFQNs(connectionPool *dbconn.DBConn) []string {
 			JOIN pg_namespace n ON c.relnamespace = n.oid
 			WHERE c.relstorage = 'h'
 			AND c.relkind = 'r'
-			AND c.oid NOT IN (SELECT inhrelid FROM pg_inherits)
+			AND c.oid NOT IN (SELECT inhparent FROM pg_inherits)
 			AND %s`, relationAndSchemaFilterClause())
 	} else {
 		query = fmt.Sprintf(`
@@ -146,7 +150,7 @@ func getHeapTableFQNs(connectionPool *dbconn.DBConn) []string {
 			JOIN pg_am a ON c.relam = a.oid
 			WHERE a.amname = 'heap'
 			AND c.relkind = 'r'
-			AND c.oid NOT IN (SELECT inhrelid FROM pg_inherits)
+			AND c.oid NOT IN (SELECT inhparent FROM pg_inherits)
 			AND %s`, relationAndSchemaFilterClause())
 	}
 
