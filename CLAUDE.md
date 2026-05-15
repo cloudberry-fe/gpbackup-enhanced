@@ -39,6 +39,51 @@ make lint                    # golangci-lint
 
 Tests use Ginkgo/Gomega framework. Unit tests are in `*_test.go` files alongside source. Test helpers in `testutils/`.
 
+**Ginkgo gotcha**: never call backup/restore functions that read flags
+(`MustGetFlagBool`, `MustGetFlagString`, …) at the *container* level of
+a `Describe`/`Context` block — those blocks run during spec-tree
+construction, before any `BeforeEach`, so the global `cmdFlags` is
+still nil and you get a panic. Always call from inside `BeforeEach`,
+`JustBeforeEach`, or the `It` body. (`backup/incremental_test.go` is
+the canonical example after the recent fix.)
+
+## Testing against a real cluster
+
+`gpbackup` runs on the coordinator and SSH-fans out to each segment
+host to invoke `gpbackup_helper`. When iterating on a patch:
+
+1. Build the three binaries (`gpbackup`, `gprestore`, `gpbackup_helper`)
+   on a linux/amd64 host matching the target cluster's OS.
+2. **Deploy `gpbackup_helper` to every segment host** at
+   `$GPHOME/bin/gpbackup_helper`. Forgetting one host = backup hangs
+   or fails on that segment with a confusing error. Back up the
+   original first; restore after the test.
+3. Run the new `gpbackup` from `dist/` directly (no need to install
+   over `$GPHOME/bin/gpbackup`).
+4. `--list-backups` / `--delete-backup` need `$MASTER_DATA_DIRECTORY`
+   (GP5/6) or `$COORDINATOR_DATA_DIRECTORY` (GP7+/Cloudberry) set in
+   the shell — that's where `gpbackup_history.db` is located.
+   `source $GPHOME/greenplum_path.sh` then set the env var explicitly.
+
+## Heap-file-hash invariants (don't break)
+
+- `getHeapTableFQNs` returns **leaf partition** FQNs plus standalone
+  heap tables. Partition parents are excluded (`NOT IN inhparent`)
+  because under `--leaf-partition-data` data flows through leaves
+  only, and `FilterTablesForIncremental` looks up hashes by the
+  leaf FQN. Reversing this to "exclude leaves" (the original bug)
+  causes every leaf to be re-backed up on every incremental.
+- `gpbackup_file_info(schema, table)` returns `<mtime>|<size>` from
+  `pg_stat_file()` and **requires a `CHECKPOINT` immediately before
+  the call** for the mtime/size to reflect the latest writes.
+  `backupIncrementalMetadata` issues this CHECKPOINT.
+- The hash query aggregates per-segment results
+  (`gp_segment_id::text || ',' || info`) and MD5s the whole string,
+  so identical mtime+size across two tables can collide. This is
+  accepted because the hash is compared per-FQN, not globally — but
+  if you ever cross-compare hashes between tables, add the
+  relfilenode to the function's return.
+
 ## Architecture
 
 ### Entry Points (build-tag gated)
@@ -102,6 +147,12 @@ When adding segment-level queries:
 - **GP6+**: `datadir` column in `gp_segment_configuration`, `plpython3u`, `gp_session_role=utility`
 - **GP6.21+**: `LOCK TABLE ... MASTER ONLY`
 - **GP7+/Cloudberry**: `pg_am.amname IN ('ao_row','ao_column')`, `gp_role=utility`, `COORDINATOR ONLY`
+
+The version-detection layer parses the GP/Cloudberry version string at
+startup. **Apache Cloudberry 2.x is NOT recognised** by this fork as
+of `82b102f` (it falls through and aborts with "GPDB version … is not
+supported. Please upgrade to GPDB 5.1.0 or later."). Only Cloudberry
+1.x / GP 5.x–7.x work end-to-end.
 
 ### Flag Registration
 
