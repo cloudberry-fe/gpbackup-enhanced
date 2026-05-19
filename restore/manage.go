@@ -46,7 +46,8 @@ func HandleManageCommands() bool {
 	defer historyDB.Close()
 
 	if doList {
-		backups, err := history.ListBackups(historyDB, backupDir)
+		excludeDeleted := MustGetFlagBool(options.EXCLUDE_DELETED)
+		backups, err := history.ListBackups(historyDB, backupDir, excludeDeleted)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			os.Exit(1)
@@ -121,7 +122,7 @@ func printBackupList(backups []history.BackupConfig) {
 
 func printDeleteResult(target string, deleted []string) {
 	sort.Strings(deleted)
-	fmt.Printf("\nDeleted %d backup(s) from history:\n", len(deleted))
+	fmt.Printf("\nMarked %d backup(s) as deleted in history:\n", len(deleted))
 	for _, ts := range deleted {
 		label := "(incremental)"
 		if ts == target {
