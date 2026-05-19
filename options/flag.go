@@ -59,6 +59,7 @@ const (
 	GEN_EXT_METADATA      = "gen-ext-metadata"
 	LIST_BACKUPS          = "list-backups"
 	DELETE_BACKUP         = "delete-backup"
+	EXCLUDE_DELETED       = "exclude-deleted"
 )
 
 func SetBackupFlagDefaults(flagSet *pflag.FlagSet) {
@@ -99,6 +100,7 @@ func SetBackupFlagDefaults(flagSet *pflag.FlagSet) {
 	flagSet.Bool(GEN_EXT_METADATA, false, "Generate external table metadata files after backup, enabling cross-cluster backup querying via gpbackup_ext_query.sh --use-metadata")
 	flagSet.Bool(LIST_BACKUPS, false, "List all backups in the history database and exit")
 	flagSet.String(DELETE_BACKUP, "", "Delete the backup with the specified timestamp and all its dependent incremental backups")
+	flagSet.Bool(EXCLUDE_DELETED, false, "When used with --list-backups, hide backups that have already been deleted")
 }
 
 func SetRestoreFlagDefaults(flagSet *pflag.FlagSet) {
@@ -137,6 +139,7 @@ func SetRestoreFlagDefaults(flagSet *pflag.FlagSet) {
 	_ = flagSet.MarkHidden(LEAF_PARTITION_DATA)
 	flagSet.Bool(LIST_BACKUPS, false, "List all backups in the history database and exit")
 	flagSet.String(DELETE_BACKUP, "", "Delete the backup with the specified timestamp and all its dependent incremental backups")
+	flagSet.Bool(EXCLUDE_DELETED, false, "When used with --list-backups, hide backups that have already been deleted")
 }
 
 /*

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strings"
 
 	"github.com/greenplum-db/gp-common-go-libs/gplog"
 	"github.com/greenplum-db/gp-common-go-libs/operating"
@@ -436,11 +437,19 @@ func GetBackupConfig(timestamp string, historyDB *sql.DB) (*BackupConfig, error)
 }
 
 // ListBackups returns backup configs from the history database, filtered by backupDir.
-// If backupDir is empty, all backups are returned.
-func ListBackups(historyDB *sql.DB, backupDir string) ([]BackupConfig, error) {
+// If backupDir is empty, all backups are returned. When excludeDeleted is true,
+// soft-deleted backups (those with a non-empty date_deleted) are filtered out.
+func ListBackups(historyDB *sql.DB, backupDir string, excludeDeleted bool) ([]BackupConfig, error) {
 	query := `SELECT timestamp FROM backups`
+	var conditions []string
 	if backupDir != "" {
-		query += fmt.Sprintf(` WHERE backup_dir = '%s'`, backupDir)
+		conditions = append(conditions, fmt.Sprintf("backup_dir = '%s'", backupDir))
+	}
+	if excludeDeleted {
+		conditions = append(conditions, "(date_deleted IS NULL OR date_deleted = '')")
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	query += ` ORDER BY timestamp DESC`
 	rows, err := historyDB.Query(query)
@@ -497,20 +506,23 @@ func FindDependentBackups(historyDB *sql.DB, baseTimestamp string) ([]string, er
 	return deps, nil
 }
 
-// DeleteBackup removes a backup record and all associated data from the history database.
-// If the backup is a full backup, all dependent incremental backups are also deleted.
-// Returns the list of timestamps that were deleted.
+// DeleteBackup marks a backup as deleted by setting date_deleted on its history
+// record. If the backup is a full backup, all dependent incremental backups
+// are also marked deleted. History rows and the restore-plan auxiliary tables
+// are preserved so the deletion is auditable; physical file cleanup is handled
+// by the caller. Returns the list of timestamps that were newly marked deleted
+// (already-deleted dependents are skipped silently).
 func DeleteBackup(historyDB *sql.DB, timestamp string) ([]string, error) {
 	cfg, err := GetMainBackupInfo(timestamp, historyDB)
 	if err != nil {
 		return nil, fmt.Errorf("backup %s not found: %w", timestamp, err)
 	}
-	_ = cfg // used to check Incremental below
+	if cfg.DateDeleted != "" {
+		return nil, fmt.Errorf("backup %s was already deleted at %s", timestamp, cfg.DateDeleted)
+	}
 
-	// Collect all timestamps to delete
-	toDelete := []string{timestamp}
-
-	// If it's a full backup, find and collect all dependent incrementals
+	// Collect candidate timestamps: self + dependents (if full)
+	candidates := []string{timestamp}
 	if !cfg.Incremental {
 		deps, err := FindDependentBackups(historyDB, timestamp)
 		if err != nil {
@@ -527,28 +539,25 @@ func DeleteBackup(historyDB *sql.DB, timestamp string) ([]string, error) {
 			}
 		}
 		for dep := range allDeps {
-			toDelete = append(toDelete, dep)
+			candidates = append(candidates, dep)
 		}
 	}
 
-	// Hard delete all collected timestamps from all tables
-	for _, ts := range toDelete {
-		hardDeleteTimestamp(historyDB, ts)
+	// Mark each candidate deleted; the WHERE-clause guard skips
+	// rows that were already soft-deleted in a previous run.
+	deletedAt := CurrentTimestamp()
+	var deleted []string
+	for _, ts := range candidates {
+		res, err := historyDB.Exec(
+			`UPDATE backups SET date_deleted = ?
+			 WHERE timestamp = ? AND (date_deleted IS NULL OR date_deleted = '')`,
+			deletedAt, ts)
+		if err != nil {
+			return deleted, fmt.Errorf("error marking backup %s deleted: %w", ts, err)
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			deleted = append(deleted, ts)
+		}
 	}
-
-	return toDelete, nil
-}
-
-// hardDeleteTimestamp removes all records for a given timestamp from the history database.
-func hardDeleteTimestamp(historyDB *sql.DB, timestamp string) {
-	// Delete from auxiliary tables first (foreign key constraints)
-	for _, table := range []string{
-		"restore_plan_tables", "restore_plans",
-		"exclude_relations", "exclude_schemas",
-		"include_relations", "include_schemas",
-	} {
-		historyDB.Exec(fmt.Sprintf("DELETE FROM %s WHERE timestamp = '%s'", table, timestamp))
-	}
-	// Delete from main backups table
-	historyDB.Exec(fmt.Sprintf("DELETE FROM backups WHERE timestamp = '%s'", timestamp))
+	return deleted, nil
 }
