@@ -141,7 +141,16 @@ Tables backed up: 3 / 3
 
 ### 5.4 Case 4 — `--ao-file-hash` 增量
 
-#### 实验组（带 `--ao-file-hash`）
+> 本用例的全量与两次增量**始终携带 `--heap-file-hash`**——目的是把 heap
+> 这一维度固定下来（heap 表全部未改 → 永远跳过），从而单独观察
+> `--ao-file-hash` 对 AO 分区族的影响。如果不加 `--heap-file-hash`，5
+> 张 heap 表会在每次增量里被无条件重备份，掩盖 AO 维度的差异。
+
+#### 实验组（带 `--ao-file-hash --heap-file-hash`）
+
+```
+gpbackup ... --leaf-partition-data --ao-file-hash --heap-file-hash --incremental --from-timestamp $TS_FULL
+```
 
 仅改 `ao_part_1_prt_2`。日志：
 
@@ -151,9 +160,13 @@ Collected incremental metadata: 7 AO tables (7 with content hash), 5 heap tables
 Tables backed up: 1 / 1
 ```
 
-只备份了变化的那一片叶子；兄弟 leaf 1 / 3 被识别为内容未变并跳过。
+只备份了变化的那一片叶子；兄弟 leaf 1 / 3 被识别为内容未变并跳过，全部 heap 也跳过。
 
-#### 对照组（同一改动模式，不带 `--ao-file-hash`）
+#### 对照组（仅带 `--heap-file-hash`，不带 `--ao-file-hash`）
+
+```
+gpbackup ... --leaf-partition-data --heap-file-hash --incremental --from-timestamp $TS_PREV
+```
 
 紧接着仅改 `ao_part_1_prt_3`，触发增量：
 
@@ -168,12 +181,17 @@ Tables backed up: 3 / 3
 
 | 模式 | 实际变更叶子 | 备份张数 | 结论 |
 |---|---|---|---|
-| `--ao-file-hash` | 1 | **1** | 精确 |
-| 默认 modcount | 1 | **3** | 全分区族都备份 |
+| `--ao-file-hash --heap-file-hash` | 1 | **1** | 精确 |
+| 仅 `--heap-file-hash`（modcount 走默认） | 1 | **3** | 整个 AO 分区族被重备份 |
 
 随着分区族尺寸增长（如月分区 12 张、日分区 30/365 张），精确度差距会被放大。
 
 恢复结果：含 leaf 级行数对比，全部 OK。
+
+> **注**：若以上两组都**去掉** `--heap-file-hash`，结果会分别变成
+> `1 + 5 = 6 张` 和 `3 + 5 = 8 张`——多出的 5 张是被无差别重备份的 heap
+> 表（h_simple、h_stable、3 个 h_part 叶子）。2026-05-19 回归把这一现象
+> 复现并写进 `case4_incr_aohash.out` / `case4_incr_modcount.out`。
 
 ### 5.5 Case 5 — `--list-backups` / `--delete-backup`
 
