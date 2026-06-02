@@ -94,6 +94,49 @@ EXT_CONFIG_FILE="$META_DIR/gpbackup_${TIMESTAMP}_ext_config.yaml"
 TOC_FILE="$META_DIR/gpbackup_${TIMESTAMP}_toc.yaml"
 
 # ══════════════════════════════════════════════════════════════
+# parse_toc — emit "schema|name|oid" per dataentries entry.
+# Prefers gpbackup_toc_extract (Go, ~1000× faster than python yaml
+# on large TOCs); falls back to python2 yaml.safe_load.
+# Args: optional filter list — repeat "--include-table s.t" /
+#       "--include-schema s" (script already collects them in
+#       INCLUDE_TABLES / INCLUDE_SCHEMAS arrays).
+# ══════════════════════════════════════════════════════════════
+parse_toc() {
+    if command -v gpbackup_toc_extract >/dev/null 2>&1; then
+        local args=(--toc "$TOC_FILE")
+        local t s
+        for t in "${INCLUDE_TABLES[@]:-}"; do
+            [[ -z "$t" ]] && continue
+            args+=(--include-table "$t")
+        done
+        for s in "${INCLUDE_SCHEMAS[@]:-}"; do
+            [[ -z "$s" ]] && continue
+            args+=(--include-schema "$s")
+        done
+        gpbackup_toc_extract "${args[@]}"
+    else
+        python2 -c "
+import yaml
+with open('$TOC_FILE') as f:
+    toc = yaml.safe_load(f)
+entries = toc.get('dataentries', [])
+include_tables = set('${INCLUDE_TABLES[*]:-}'.split()) if '${INCLUDE_TABLES[*]:-}' else set()
+include_schemas = set('${INCLUDE_SCHEMAS[*]:-}'.split()) if '${INCLUDE_SCHEMAS[*]:-}' else set()
+for e in entries:
+    schema = e.get('schema', '')
+    name = e.get('name', '')
+    oid = e.get('oid', 0)
+    fqn = schema + '.' + name
+    if include_tables and fqn not in include_tables:
+        continue
+    if include_schemas and schema not in include_schemas:
+        continue
+    print('%s|%s|%s' % (schema, name, oid))
+" 2>/dev/null
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════
 # Get segment info: from database or metadata file
 # ══════════════════════════════════════════════════════════════
 get_segment_info_from_db() {
@@ -178,14 +221,8 @@ if $GEN_METADATA; then
     echo "  Collecting segment information..."
     SEG_INFO=$(get_segment_info_from_db)
 
-    # 2. Table list from TOC
-    TABLE_LIST=$(python2 -c "
-import yaml
-with open('$TOC_FILE') as f:
-    toc = yaml.safe_load(f)
-for e in toc.get('dataentries', []):
-    print('%s|%s|%s' % (e.get('schema',''), e.get('name',''), e.get('oid',0)))
-" 2>/dev/null)
+    # 2. Table list from TOC (fast path via gpbackup_toc_extract; python2 fallback)
+    TABLE_LIST=$(parse_toc)
 
     # 3. Write metadata YAML
     echo "  Writing metadata file..."
@@ -394,24 +431,7 @@ echo ""
 
 # ── Parse TOC for table list ──
 echo "Parsing backup TOC..."
-TABLES_INFO=$(python2 -c "
-import yaml
-with open('$TOC_FILE') as f:
-    toc = yaml.safe_load(f)
-entries = toc.get('dataentries', [])
-include_tables = set('${INCLUDE_TABLES[*]:-}'.split()) if '${INCLUDE_TABLES[*]:-}' else set()
-include_schemas = set('${INCLUDE_SCHEMAS[*]:-}'.split()) if '${INCLUDE_SCHEMAS[*]:-}' else set()
-for e in entries:
-    schema = e.get('schema', '')
-    name = e.get('name', '')
-    oid = e.get('oid', 0)
-    fqn = schema + '.' + name
-    if include_tables and fqn not in include_tables:
-        continue
-    if include_schemas and schema not in include_schemas:
-        continue
-    print('%s|%s|%s' % (schema, name, oid))
-" 2>/dev/null)
+TABLES_INFO=$(parse_toc)
 
 [[ -z "$TABLES_INFO" ]] && echo "ERROR: No tables found in TOC" && exit 1
 TABLE_COUNT=$(echo "$TABLES_INFO" | wc -l | tr -d ' ')

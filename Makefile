@@ -8,6 +8,7 @@ endif
 BACKUP=gpbackup
 RESTORE=gprestore
 HELPER=gpbackup_helper
+TOC_EXTRACT=gpbackup_toc_extract
 BIN_DIR=$(shell echo $${GOPATH:-~/go} | awk -F':' '{ print $$1 "/bin"}')
 GINKGO_FLAGS := -r --keep-going --randomize-suites --randomize-all --no-color
 GIT_VERSION := $(shell git describe --tags | perl -pe 's/(.*)-([0-9]*)-(g[0-9a-f]*)/\1+dev.\2.\3/')
@@ -82,6 +83,7 @@ build : $(GOSQLITE)
 		CGO_ENABLED=1 $(GO_BUILD) -tags '$(BACKUP)' -o $(BIN_DIR)/$(BACKUP) --ldflags '-X $(BACKUP_VERSION_STR)'
 		CGO_ENABLED=1 $(GO_BUILD) -tags '$(RESTORE)' -o $(BIN_DIR)/$(RESTORE) --ldflags '-X $(RESTORE_VERSION_STR)'
 		CGO_ENABLED=1 $(GO_BUILD) -tags '$(HELPER)' -o $(BIN_DIR)/$(HELPER) --ldflags '-X $(HELPER_VERSION_STR)'
+		CGO_ENABLED=0 $(GO_BUILD) -tags '$(TOC_EXTRACT)' -o $(BIN_DIR)/$(TOC_EXTRACT)
 
 debug :
 		CGO_ENABLED=1 $(GO_BUILD) -tags '$(BACKUP)' -o $(BIN_DIR)/$(BACKUP) -ldflags "-X $(BACKUP_VERSION_STR)" $(DEBUG)
@@ -92,6 +94,7 @@ build_linux :
 		env GOOS=linux GOARCH=amd64 $(GO_BUILD) -tags '$(BACKUP)' -o $(BACKUP) -ldflags "-X $(BACKUP_VERSION_STR)"
 		env GOOS=linux GOARCH=amd64 $(GO_BUILD) -tags '$(RESTORE)' -o $(RESTORE) -ldflags "-X $(RESTORE_VERSION_STR)"
 		env GOOS=linux GOARCH=amd64 $(GO_BUILD) -tags '$(HELPER)' -o $(HELPER) -ldflags "-X $(HELPER_VERSION_STR)"
+		env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO_BUILD) -tags '$(TOC_EXTRACT)' -o $(TOC_EXTRACT)
 
 install :
 		cp $(BIN_DIR)/$(BACKUP) $(BIN_DIR)/$(RESTORE) $(GPHOME)/bin
