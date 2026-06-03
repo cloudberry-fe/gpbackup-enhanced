@@ -379,7 +379,7 @@ for m in cfg.get('host_map', []):
 
     for host in $HOSTS; do
         echo "  Stopping gpfdist on $host..."
-        ssh -o StrictHostKeyChecking=no -o BatchMode=yes -f "$host" \
+        ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 "$host" \
             "cd / && pkill -f \"$TAG\" 2>/dev/null; true" </dev/null 2>/dev/null || true
     done
     echo "  Stopping gpfdist on coordinator..."
@@ -458,11 +458,11 @@ echo "Starting gpfdist services..."
 for host in $UNIQUE_HOSTS; do
     echo "  Starting gpfdist on $host:$GPFDIST_PORT..."
     ssh -o StrictHostKeyChecking=no -o BatchMode=yes -f "$host" \
-        "cd / ; gpfdist -d $BACKUP_DIR -p $GPFDIST_PORT -m 1048576 >>/tmp/$TAG.log 2>&1 &" </dev/null
+        "cd / ; gpfdist -d $BACKUP_DIR -p $GPFDIST_PORT -m 1048576 -l /tmp/$TAG.log &" </dev/null
 done
 COORD_HOST=$(hostname)
 echo "  Starting gpfdist on coordinator $COORD_HOST:$GPFDIST_PORT..."
-gpfdist -d "$BACKUP_DIR" -p "$GPFDIST_PORT" -m 1048576 >>/tmp/$TAG.log 2>&1 &
+gpfdist -d "$BACKUP_DIR" -p "$GPFDIST_PORT" -m 1048576 -l /tmp/$TAG.log &
 sleep 2
 echo "  gpfdist services started."
 
